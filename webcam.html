@@ -1,0 +1,63 @@
+<%method title>WebCam @ the JeNeechiPad</%method>
+<%args>
+	$stream => 0;
+	$save2archive => undef;
+</%args>
+<%once>
+	use File::Copy ();
+</%once>
+<%init>
+	if (defined $save2archive) {
+		our $ip = ($r->headers_in->{'X-Forwarded-For'} || $r->connection->remote_ip());
+		if (open(IP,"</tmp/webcam/ipcache/$ip")) {
+			my $file = <IP>;
+			chomp $file;
+			close(IP);
+			if (-f $file) {
+				(my $newfile = $file) =~ s/.*\///;
+				File::Copy::copy($file,sprintf('%s/webcam/archive/%s',$r->document_root,$newfile));
+			}
+		}
+	}
+</%init>
+<%method head>
+   <meta http-equiv="refresh" content="300" />
+   <script type='text/javascript'>
+   <!--
+      // Get a query string key value pair
+      function getQueryVariable(variable) {
+         var query = window.location.search.substring(1);
+         var vars = query.split("&");
+         for (var i=0;i<vars.length;i++) {
+            var pair = vars[i].split("=");
+            if (pair[0] == variable) {
+               return pair[1];
+            }
+         } 
+         return null;
+      }
+      function rnd(lo,hi){
+         return lo + Math.round(Math.random() * (hi-lo));
+      }
+      function webcam(){ 
+        // if (navigator.appName.toUpperCase() == 'MICROSOFT INTERNET EXPLORER' && navigator.appVersion.indexOf("MSIE") > 0) {
+         if (getQueryVariable('stream') != 1) {
+            document.getElementById('webcam').src="webcam.mas?" + rnd(0,100000);
+            setTimeout('webcam()',2000);
+         }
+      }
+   //-->
+   </script>
+</%method>
+<%method onload> onload='webcam()' </%method> 
+<form method="post" action="<% $r->uri %>?stream=<% $stream %>">
+ <center>
+  <img id='webcam' src='webcam.mas?stream=<% $stream %>' />
+  <br />
+  <a href="?stream=0">JavaScript Refresh</a> |
+  <a href="?stream=1">Server Push</a> |
+  <a href="archive/">Archive</a> | 
+  <input type="submit" value="Save" name="save2archive">
+  <p style='padding-top:20px; color: #999999;'>Server push will not work in Microsoft Internet Explorer.</p>
+ </center>
+</form>

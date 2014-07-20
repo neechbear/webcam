@@ -1,0 +1,151 @@
+<%flags>
+	inherit => undef
+</%flags>
+<%args>
+	$stream => 0
+</%args>
+<%once>
+	use Image::Magick ();
+</%once>
+<%init>
+	# Set some constants
+	our $boundary = 'THISISMYBOUNDARY';
+	our $frequency = 4;
+	our @months = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
+	our @days = qw(Mon Tue Wed Thu Fri Sat Sun);
+	#our $stream = $r->header_in('User-Agent') =~ /Gecko/ ? 1 : 0;
+	our $imgdir = '/tmp/webcam';
+	our $ipcachedir = '/tmp/webcam/ipcache';
+	our $ip = ($r->headers_in->{'X-Forwarded-For'} || $r->connection->remote_ip());
+
+	# Send initial server push header
+	$r->content_type(($stream ? "multipart/x-mixed-replace;boundary=$boundary" : 'image/jpeg'));
+	$r->no_cache(1);
+	$r->send_http_header();
+	if ($stream) {
+		$m->print("\n--$boundary\n");
+		$m->flush_buffer();
+		$m->clear_buffer();
+	}
+
+	# Forever
+	while (1) {
+		# Send the next image part to the client browser
+		$m->print("Content-Type: image/jpeg\n\n") if $stream;
+
+		# Send a pre-processed image if there is a recent one
+		my $pre_processed_image = get_input_filename($imgdir,'camX');
+		if (defined $pre_processed_image && $pre_processed_image =~ /-(\d{10})\./ && $1 > time - $frequency) {
+			#warn "Sending $pre_processed_image ...\n";
+			open(FD,"<$pre_processed_image") || die "Unable to open file handle FD for file '$pre_processed_image': $!";
+			while (local $_ = <FD>) { $m->print($_); }
+			close(FD) || warn "Unable to close file handle FD for file '$pre_processed_image': $!";
+			write_ip_cache($pre_processed_image);
+
+		# Otherwise process a source image outself
+		} else {
+			$m->print(process_source_image(get_input_filename($imgdir)));
+		}
+
+		# Send multipart boundry (or not) for server push streaming
+		if ($stream) {
+			$m->print("\n--$boundary\n");
+			$m->flush_buffer();
+			$m->clear_buffer();
+			sleep $frequency;
+		} else {
+			last;
+		}
+	}
+
+
+
+	sub write_ip_cache {
+		my $sent_file = shift;
+		if (open(IP,">$ipcachedir/$ip")) {
+			print IP "$sent_file\n";
+			close(IP) || warn "Unable to close file handle LOG for file '$ipcachedir/$ip': $!";
+		}
+	}
+
+
+	# Process the source image
+	sub process_source_image {
+		my $source_image = shift;
+		my $time = time();
+		(my $processed_image = $source_image) =~ s/(\w+)(-\d+-\d+)(\.\w+)$/camX$2-$time$3/;
+		#warn "Image processing $source_image ...\n";
+
+		my $font = '/home/nicolaw/fonts/trebuc.ttf';
+		my $barheight = 14;
+		my $fontsize = 10;
+		my $bgcolour = '#ffccff';
+		my $commentfile = '/tmp/webcam/webcam.txt';
+
+		# Read in the raw source webcam image
+		my $image = Image::Magick->new;
+		$image->ReadImage($source_image);
+		my ($width, $height) = map { $image->Get($_) } qw(Width Height);
+
+		# Format a datetime string for use a few times later
+		my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime();
+		my $datetime = sprintf('%s %s %s %04d, %d:%02d:%02d',$days[$wday],$mday,$months[$mon],$year+1900,$hour,$min,$sec);
+
+		# Add the title bar
+		$image->Draw(fill=>$bgcolour, stroke=>'transparent', primitive=>'rectangle', points=>sprintf('1,1 %d,%d',$width-2,$barheight));
+		$image->Annotate(font=>$font, x=>$width-3, y=>11, pointsize=>$fontsize, fill=>'black', align=>'right', text=>$datetime);
+		$image->Annotate(font=>$font, x=>4, y=>11, pointsize=>$fontsize, fill=>'black', align=>'left', text=>'(c)'.($year+1900).' www.neechi.co.uk/webcam/');
+
+		# Add comments at the bottom of the page if necessary
+		if (-f $commentfile && -r $commentfile && open(FH,"<$commentfile")) {
+			my $comment = <FH>; chomp $comment;
+			close(FH);
+			if (length($comment) > 0 && $comment != /^\s*$/) {
+				$image->Draw(fill=>$bgcolour, stroke=>'transparent', primitive=>'rectangle', points=>sprintf('1,%d %d,%d',$height-$barheight-1,$width-2,$height-2));
+				$image->Annotate(font=>$font, x=>4, y=>$height-5, pointsize=>$fontsize, fill=>'black', align=>'left', text=>$comment);
+			}
+		}
+
+		# Add comments to the image
+		# $image->Comment(sprintf('%s downloaded by %s at %s',$r->uri,$r->connection->remote_ip,$datetime));
+
+		# Add a neechi cartoon
+		my $overlay = Image::Magick->new;
+		$overlay->ReadImage(sprintf('%s/webcam/overlay.gif',$r->document_root));
+		$overlay->Sample(width => 50, height => 100);
+		$image->Composite(image => $overlay, x => 260, y => 139);
+
+		# Write a finished image so it can be used as a 10 second cache for
+		# any other clients wanting these webcam images at the same time
+		$image->Write("$processed_image-$$");
+		rename "$processed_image-$$", $processed_image;
+		write_ip_cache($processed_image);
+
+		# Return a blob of image data
+		return $image->ImageToBlob();
+	}
+
+
+
+
+	# Get the most recent raw webcam image filename
+	sub get_input_filename {
+		my $imgdir = shift;
+		my $prefix = shift || 'cam';
+
+		# Get the list of files
+		opendir(DH,$imgdir) || die "Unable to open file handle DH for directory '$imgdir': $!";
+		my @images = sort { $a cmp $b } grep(/^$prefix-\d{8}-\d{6}(-\d{10})?\.jpg$/,readdir(DH));
+		closedir(DH) || warn "Unable to close file handle DH for directory '$imgdir': $!";
+
+		# Get the file to return
+		my $file = pop(@images);
+
+		# Delete old files past last X files (1 more than $frequency)
+		for (1..($frequency+1)) { pop @images; }
+		unlink "$imgdir/$_" for @images;
+
+		# Return saved filename
+		return defined $file ? "$imgdir/$file" : undef;
+	}
+</%init>
